@@ -419,6 +419,7 @@ nsapi_size_or_error_t AT_CellularSMS::send_sms(const char *phone_number, const c
         return NSAPI_ERROR_PARAMETER;
     }
 
+    _at.set_at_timeout(10s);
     _at.lock();
 
     int write_size = 0;
@@ -438,6 +439,7 @@ nsapi_size_or_error_t AT_CellularSMS::send_sms(const char *phone_number, const c
                 _at.cmd_start(ESC);
                 _at.cmd_stop();
                 _at.unlock();
+                _at.restore_at_timeout();
                 return write_size;
             }
             // <ctrl-Z> (IRA 26) must be used to indicate the ending of the message body.
@@ -483,6 +485,7 @@ nsapi_size_or_error_t AT_CellularSMS::send_sms(const char *phone_number, const c
                                  sms_count, i + 1, header_len);
             if (!pdu_str) {
                 _at.unlock();
+                _at.restore_at_timeout();
                 return NSAPI_ERROR_NO_MEMORY;
             }
             pdu_len = strlen(pdu_str);
@@ -510,6 +513,7 @@ nsapi_size_or_error_t AT_CellularSMS::send_sms(const char *phone_number, const c
                     _at.cmd_start(ESC);
                     _at.cmd_stop();
                     _at.unlock();
+                    _at.restore_at_timeout();
                     delete [] pdu_str;
                     return msg_write_len;
                 }
@@ -523,7 +527,10 @@ nsapi_size_or_error_t AT_CellularSMS::send_sms(const char *phone_number, const c
             delete [] pdu_str;
             remaining_len -= concatenated_sms_length;
             if (_at.get_last_error() != NSAPI_ERROR_OK) {
-                return _at.unlock_return_error();
+                nsapi_error_t ret = _at.get_last_error();
+                _at.unlock();
+                _at.restore_at_timeout();
+                return ret;
             }
         }
     }
@@ -531,6 +538,8 @@ nsapi_size_or_error_t AT_CellularSMS::send_sms(const char *phone_number, const c
     _sms_message_ref_number++;
     nsapi_error_t ret = _at.get_last_error();
     _at.unlock();
+    _at.restore_at_timeout();
+    _at.clear_error();
 
     return (ret == NSAPI_ERROR_OK) ? msg_len : ret;
 }
@@ -696,6 +705,7 @@ nsapi_size_or_error_t AT_CellularSMS::get_sms(char *buf, uint16_t len, char *pho
         return NSAPI_ERROR_PARAMETER;
     }
 
+    _at.set_at_timeout(10s);
     _at.lock();
 
     nsapi_size_or_error_t err = list_messages();
@@ -735,6 +745,7 @@ nsapi_size_or_error_t AT_CellularSMS::get_sms(char *buf, uint16_t len, char *pho
     free_linked_list();
 
     _at.unlock();
+    _at.restore_at_timeout();
 
     // update error only when there really was an error, otherwise we return the length
     if (_at.get_last_error()) {
@@ -1027,6 +1038,7 @@ nsapi_error_t AT_CellularSMS::list_messages()
     int index = 0;
     int length = 0;
     char *pdu = NULL;
+    char buffer[32]; // 32 > SMS_STATUS_SIZE, SMS_MAX_PHONE_NUMBER_SIZE, SMS_MAX_TIME_STAMP_SIZE
 
     _at.resp_start("+CMGL:");
     while (_at.info_resp()) {
@@ -1049,8 +1061,18 @@ nsapi_error_t AT_CellularSMS::list_messages()
             // +CMGL: <index>,<stat>,<oa/da>,[<alpha>],[<scts>][,<tooa/toda>,<length>]<CR><LF><data>[<CR><LF>
             // +CMGL: <index>,<stat>,<da/oa>,[<alpha>],[<scts>][,<tooa/toda>,<length>]<CR><LF><data>[...]]
             index = _at.read_int();
-            (void)_at.consume_to_stop_tag(); // consume until <CR><LF>
-            (void)_at.consume_to_stop_tag(); // consume until <CR><LF>
+            _at.read_string(buffer, SMS_STATUS_SIZE);
+            _at.read_string(buffer, SMS_MAX_PHONE_NUMBER_SIZE);
+            _at.skip_param(); // <alpha>
+            _at.read_string(buffer, SMS_MAX_TIME_STAMP_SIZE);
+            _at.read_int();
+            int size = _at.read_int(); // length
+            _at.consume_to_stop_tag(); //  consume until <CR><LF> end of header
+            if (size > 0) {
+                // we can not use skip param because we already consumed stop tag
+                _at.skip_param_bytes(size, 1);
+            }
+            _at.consume_to_stop_tag_even_stop_tag_found(); // consume until <CR><LF> -> data
         }
 
         if (index >= 0) {
